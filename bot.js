@@ -8,8 +8,8 @@ import { firstMessage, secondMessage, takeSickDayMessage, confirmSickDayMessage 
 const TOKEN = '7502069553:AAEmY4Y8NxyNusowJimPGCmg-3jFyDEa-zQ';
 
 // чат админа (сейчас Ника, потом исправить )
-// const ADMIN_CHAT_ID = '98150327'; // Ника
-const ADMIN_CHAT_ID = '314147055'; // Даша
+const ADMIN_CHAT_ID = '98150327'; // Ника
+// const ADMIN_CHAT_ID = '314147055'; // Даша
 
 getUsers()
 
@@ -74,6 +74,13 @@ bot.onText('/start', async (msg) => {
     }, 500)
 
     bot.once('message', async (response) => {
+
+        const words = response.text.split(/\s+/); // Разделяем текст по пробелам
+
+        if (words.length !== 3) {
+            await bot.sendMessage(chatId, "Пожалуйста, повторно нажмите /start и укажите фамилию, имя и отчество. ");
+            return;
+        }
 
         const newUser = {
             user_id: chatId,
@@ -343,7 +350,7 @@ async function takeSickDay(chatId) {
                 client.release(); // Освобождаем соединение в пул
             }
         } else {
-            bot.sendMessage(chatId, `Упс, ты ошибся. Попробуй ещё раз`);
+            bot.sendMessage(chatId, `Упс, ты ошибся. Попробуй ещё раз, вызвав команду /takemysickdaycount`);
         }
     });
 }
