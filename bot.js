@@ -1,4 +1,4 @@
-import pool from "./db.js";
+import { pool, createPool } from "./db.js";
 process.env.NTBA_FIX_350 = true;
 import TelegramBot from 'node-telegram-bot-api';
 import fs from 'fs';
@@ -7,7 +7,7 @@ import { firstMessage, secondMessage, takeSickDayMessage, confirmSickDayMessage 
 // токен от BotFather
 const TOKEN = '7502069553:AAEmY4Y8NxyNusowJimPGCmg-3jFyDEa-zQ';
 
-// чат админа (сейчас Ника, потом исправить )
+// чат админа (сейчас Даша, потом исправить )
 const ADMIN_CHAT_ID = '98150327'; // Ника
 // const ADMIN_CHAT_ID = '314147055'; // Даша
 
@@ -17,9 +17,14 @@ getUsers()
 const bot = new TelegramBot(TOKEN, { polling: true });
 
 // добавляем обработку ошибок для отладки
-bot.on('polling_error', (error) => {
+bot.on('polling_error', async (error) =>  {
     console.error('Ошибка опроса:', error);
+    await reconnectDatabase();
 });
+//
+setInterval(async () => {
+    await checkDatabaseConnection();
+}, 24 * 60 * 60 * 1000); // Каждые 24 часа
 
 // логирование для теста в консоли
 console.log('Бот запущен и ожидает команды...');
@@ -36,9 +41,9 @@ bot.on('new_chat_members', async (msg) => {
         return
     }
 
-    bot.sendMessage(chatId, firstMessage);
+    bot.sendMessage(chatId, firstMessage, { parse_mode: "HTML", disable_web_page_preview: true });
     setTimeout(() => {
-        bot.sendMessage(chatId, secondMessage);
+        bot.sendMessage(chatId, secondMessage, { parse_mode: "HTML", disable_web_page_preview: true });
     }, 500)
 
     bot.once('message', async (response) => {
@@ -68,9 +73,9 @@ bot.onText('/start', async (msg) => {
         return
     }
 
-    bot.sendMessage(chatId, firstMessage);
+    bot.sendMessage(chatId, firstMessage, { parse_mode: "HTML", disable_web_page_preview: true });
     setTimeout(() => {
-        bot.sendMessage(chatId, secondMessage);
+        bot.sendMessage(chatId, secondMessage, { parse_mode: "HTML", disable_web_page_preview: true });
     }, 500)
 
     bot.once('message', async (response) => {
@@ -102,13 +107,9 @@ bot.onText(/\/getmysickdaycount/, async (msg) => {
     const messageId = msg.message_id;
     let sickDayCount = 5
 
-    try {
-        await bot.deleteMessage(chatId, messageId);
-    } catch (error) {
-        console.error("Ошибка при удалении сообщения:", error);
-    }
+    removeMessage(chatId, messageId);
 
-    const isRegistered = checkRegisterUser(chatId)
+    const isRegistered = await checkRegisterUser(chatId)
 
     if (!isRegistered) {
         bot.sendMessage(chatId, `Ты еще не зарегистрирован(а).`);
@@ -124,7 +125,7 @@ bot.onText(/\/takemysickdaycount/, async (msg) => {
 
     removeMessage(chatId, messageId);
 
-    const isRegistered = checkRegisterUser(chatId)
+    const isRegistered = await checkRegisterUser(chatId)
 
     if (!isRegistered) {
         bot.sendMessage(chatId, `Ты еще не зарегистрирован(а).`);
@@ -146,7 +147,7 @@ bot.onText(/\/cancelmysickday/, async (msg) => {
 
     removeMessage(chatId, messageId);
 
-    const isRegistered = checkRegisterUser(chatId)
+    const isRegistered = await checkRegisterUser(chatId)
 
     if (!isRegistered) {
         bot.sendMessage(chatId, `Ты еще не зарегистрирован(а).`);
@@ -159,10 +160,9 @@ bot.onText(/\/cancelmysickday/, async (msg) => {
             )
             AND creation_date >= NOW() - INTERVAL '2 hours'
         `;
-        const client = await pool.connect();
 
         try {
-            const result = await client.query(query, [chatId]);
+            const result = await pool.query(query, [chatId]);
             const lastSickDay = result.rows.at(-1) || null
 
             if (!lastSickDay) {
@@ -174,7 +174,6 @@ bot.onText(/\/cancelmysickday/, async (msg) => {
             console.error('Ошибка выполнения запроса:', err);
             bot.sendMessage(chatId, `Ошибка выполнения запроса. Напиши эйчарам.`);
         } finally {
-            client.release(); // Освобождаем соединение в пул
         }
     }
 });
@@ -185,26 +184,22 @@ bot.onText(/\/clearall/, async (msg) => {
     const chatId = msg.chat.id;
 
     if (ADMIN_CHAT_ID == chatId) {
-        const query = `DELETE FROM SickDay`;
-        const client = await pool.connect();
-
-        try {
-            await client.query(query);
-            bot.sendMessage(chatId, "Все записи успешно обновлены. Теперь у всех sickDayCount = 5! (*・ω・)ﾉ");
-
-        } catch (err) {
-            console.error('Ошибка выполнения запроса:', err);
-            bot.sendMessage(ADMIN_CHAT_ID, `Ошибка выполнения запроса. Кричите караул, товарищ эйчар :DD`);
-        } finally {
-            client.release(); // Освобождаем соединение в пул
-        }
+        bot.sendMessage(chatId, `‼️ ты собираешься обнулить все сикдеи для всей компании за этот год. данные будет не восстановить. 
+точно обнулить❓`, {
+            reply_markup: {
+                inline_keyboard: [
+                    [{ text: "Подтвердить", callback_data: "confirm_clearall" }]
+                ],
+            },
+        });
     } else {
         const photoStream = fs.createReadStream('./image/not-power.png');
         bot.sendPhoto(chatId, photoStream, {
-            caption: "У вас недостаточно прав! ヾ(=`ω´=)ノ”"
+            caption: "У вас недостаточно прав!"
         });
     }
 });
+
 
 bot.onText(/\/showall/, async (msg) => {
     const chatId = msg.chat.id;
@@ -215,13 +210,16 @@ bot.onText(/\/showall/, async (msg) => {
     } else {
         const photoStream = fs.createReadStream('./image/big-city.png');
         bot.sendPhoto(chatId, photoStream, {
-            caption: "У вас недостаточно прав! ヾ(=`ω´=)ノ”"
+            caption: "У вас недостаточно прав!"
         });
     }
 });
 
 bot.onText(/\/help/, async (msg) => {
     const chatId = msg.chat.id;
+    const messageId = msg.message_id;
+
+    removeMessage(chatId, messageId);
 
     const message = `
     Привет, я ассистент по сикдей в HH.
@@ -234,6 +232,30 @@ bot.onText(/\/help/, async (msg) => {
   `
     bot.sendMessage(chatId, message);
 
+});
+
+bot.on("callback_query", async (query) => {
+    const chatId = query.message.chat.id;
+    const data = query.data;
+
+    // Проверяем, что нажата кнопка подтверждения
+    if (data === "confirm_clearall") {
+        if (ADMIN_CHAT_ID == chatId) {
+            const query = `DELETE FROM SickDay`;
+
+            try {
+                await pool.query(query);
+                bot.sendMessage(chatId, "Все записи успешно обновлены. Теперь у всех sickDayCount = 5!");
+            } catch (err) {
+                console.error('Ошибка выполнения запроса:', err);
+                bot.sendMessage(ADMIN_CHAT_ID, `Ошибка выполнения запроса. Кричите караул, товарищ эйчар :DD`);
+            }
+        } else {
+            bot.sendMessage(chatId, "У вас недостаточно прав для выполнения этой операции.");
+        }
+        // Закрываем окно кнопки
+        bot.answerCallbackQuery(query.id);
+    }
 });
 
 async function removeMessage(chatId, messageId) {
@@ -256,62 +278,54 @@ async function addUser(value) {
         value.username,
         value.chat_id,
     ];
-    const client = await pool.connect();
 
     try {
-        await client.query(query, user);
+        await pool.query(query, user);
         console.log('Пользователь добавлен!');
     } catch (err) {
         console.error('Ошибка выполнения запроса:', err);
         bot.sendMessage(value.chat_id, `Ошибка выполнения запроса. Напиши эйчарам.`);
     } finally {
-        client.release(); // Освобождаем соединение в пул
     }
 }
 
 async function getUsers(chatId) {
     const query = 'SELECT * FROM users'; // SQL-запрос для получения всех пользователей
-    const client = await pool.connect();
 
     try {
-        const result = await client.query(query); // Выполняем запрос
+        const result = await pool.query(query); // Выполняем запрос
         console.log(result.rows)
         return result.rows; // Возвращаем строки с данными
     } catch (err) {
         console.error('Ошибка выполнения запроса:', err);
         bot.sendMessage(chatId, `Ошибка выполнения запроса. Напиши эйчарам.`);
     } finally {
-        client.release(); // Освобождаем соединение в пул
     }
 }
 
 async function checkRegisterUser(chatId){
     const query = `SELECT count(*) FROM users WHERE chat_id = $1`
-    const client = await pool.connect();
 
     try {
-        const result = await client.query(query, [chatId]); // Выполняем запрос
-        return parseInt(result.rows[0].count) !== 0// Возвращаем
+        const result = await pool.query(query, [chatId]); // Выполняем запрос
+        return result.rows[0].count !== '0'// Возвращаем
     } catch (err) {
         console.error('Ошибка выполнения запроса:', err);
         bot.sendMessage(chatId, `Ошибка выполнения запроса. Напиши эйчарам.`);
-    } finally {
-        client.release(); // Освобождаем соединение в пул
     }
 }
 
 async function cancelSickDay(sickDay, chatId){
     const query = `DELETE FROM SickDay WHERE sick_day_id = $1`
-    const client = await pool.connect();
 
     try {
-        await client.query(query, [sickDay.sick_day_id]);
-        bot.sendMessage(chatId, `Ты успешно отменил последний взятый сикдей. Удачи! с:`);
+        await pool.query(query, [sickDay.sick_day_id]);
+        bot.sendMessage(chatId, `Ты успешно отменил последний взятый сикдей. Удачи!`);
+        sendInfoAdmin(chatId, false)
     } catch (err) {
         console.error('Ошибка выполнения запроса:', err);
         bot.sendMessage(chatId, `Ошибка выполнения запроса. Напиши эйчарам.`);
     } finally {
-        client.release(); // Освобождаем соединение в пул
     }
 }
 
@@ -335,19 +349,14 @@ async function takeSickDay(chatId) {
                 formattedDate
             ];
 
-            console.log(sickDay)
-            const client = await pool.connect();
-
-
             try {
-                await client.query(query, sickDay);
-                bot.sendMessage(chatId, confirmSickDayMessage);
+                await pool.query(query, sickDay);
+                bot.sendMessage(chatId, confirmSickDayMessage, { parse_mode: "HTML", disable_web_page_preview: true });
                 sendInfoAdmin(chatId, response.text)
             } catch (err) {
                 console.error('Ошибка выполнения запроса:', err);
                 bot.sendMessage(chatId, `Ошибка выполнения запроса. Напиши эйчарам.`);
             } finally {
-                client.release(); // Освобождаем соединение в пул
             }
         } else {
             bot.sendMessage(chatId, `Упс, ты ошибся. Попробуй ещё раз, вызвав команду /takemysickdaycount`);
@@ -363,18 +372,16 @@ async function getCountSickDay(chatId) {
             SELECT user_id FROM users WHERE user_id = $1
         )
     `;
-    const client = await pool.connect();
 
 
     try {
-        const result = await client.query(query, [chatId]);
+        const result = await pool.query(query, [chatId]);
         const count = parseInt(result.rows[0].count);
         return count
     } catch (err) {
         console.error('Ошибка выполнения запроса:', err);
         bot.sendMessage(chatId, `Ошибка выполнения запроса. Напиши эйчарам.`);
     } finally {
-        client.release(); // Освобождаем соединение в пул
     }
 }
 
@@ -383,18 +390,20 @@ async function sendInfoAdmin(chatId, sickDay){
         SELECT *
         FROM users WHERE chat_id = $1
     `;
-    const client = await pool.connect();
 
     try {
-        const result = await client.query(query, [chatId]);
+        const result = await pool.query(query, [chatId]);
         const user = result.rows[0];
         const sickDayCount = await getCountSickDay(chatId)
-        bot.sendMessage(ADMIN_CHAT_ID, `${user.name} использует сикдей ${sickDay}. Остаток сикдеев: ${5 - sickDayCount}`);
+        if (sickDay) {
+            bot.sendMessage(ADMIN_CHAT_ID, `${user.name} использует сикдей ${sickDay}. Остаток сикдеев: ${5 - sickDayCount}`);
+        } else {
+            bot.sendMessage(ADMIN_CHAT_ID, `${user.name} отменил последний сикдей. Остаток сикдеев: ${5 - sickDayCount}`);
+        }
     } catch (err) {
         console.error('Ошибка выполнения запроса:', err);
         bot.sendMessage(ADMIN_CHAT_ID, `Ошибка выполнения запроса. Кричите караул, товарищ эйчар :DD`);
     } finally {
-        client.release(); // Освобождаем соединение в пул
     }
 
 }
@@ -422,4 +431,32 @@ function useNumWord()  {
         numWord,
     }
 }
+
+async function reconnectDatabase() {
+    try {
+        pool.end(); // Завершить текущее соединение
+        createPool(); // Создать новый пул
+        // Тестируем новое соединение
+        const client = await pool.connect();
+        client.release(); // Освобождаем клиента
+        console.log('Соединение с базой данных восстановлено.');
+    } catch (err) {
+        console.error('Не удалось восстановить соединение с базой данных:', err);
+    }
+}
+
+async function checkDatabaseConnection() {
+    try {
+        await pool.query('SELECT * FROM users'); // Простой запрос
+        console.log('Соединение с базой данных активно.');
+    } catch (err) {
+        console.error('Соединение с базой данных потеряно:', err);
+        // Попытка восстановления соединения
+        await reconnectDatabase();
+    }
+}
+
+
+
+
 
